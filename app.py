@@ -2,6 +2,7 @@
 import os, json, re
 import numpy as np
 import pandas as pd
+from pathlib import Path
 import faiss
 from typing import Optional
 from fastapi import FastAPI
@@ -16,6 +17,18 @@ CONTACTS_PATH = os.getenv("CONTACTS_PATH", "data/processed/contacts.json")
 INDEX_DIR     = os.getenv("INDEX_DIR", "data/index")
 EMBED_MODEL   = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 GEN_MODEL     = os.getenv("GEN_MODEL", "gpt-4.1-mini")
+
+# --- tiny auto-detection for repo layouts (uses env if set; otherwise falls back) ---
+if not os.path.exists(CONTACTS_PATH):
+    alt_contacts = "adlatus_rag/data/processed/contacts.json"
+    if os.path.exists(alt_contacts):
+        CONTACTS_PATH = alt_contacts
+
+idx_candidate = os.path.join(INDEX_DIR, "faiss.index")
+if not os.path.exists(idx_candidate):
+    alt_index_dir = "adlatus_rag/data/index"
+    if os.path.exists(os.path.join(alt_index_dir, "faiss.index")):
+        INDEX_DIR = alt_index_dir
 
 client = OpenAI()
 
@@ -36,7 +49,7 @@ META = None
 def load_contacts():
     global CONTACTS
     if CONTACTS is None:
-        if os.path.exists(CONTACTS_PATH):
+        if CONTACTS_PATH and os.path.exists(CONTACTS_PATH):
             with open(CONTACTS_PATH, "r", encoding="utf-8") as f:
                 CONTACTS = json.load(f)
         else:
@@ -44,9 +57,14 @@ def load_contacts():
     return CONTACTS
 
 def load_index():
+    """Load FAISS + metadata if present. Return (None, None) if not."""
     global FAISS, META
     if FAISS is None or META is None:
-        FAISS = faiss.read_index(os.path.join(INDEX_DIR, "faiss.index"))
+        idx_path = os.path.join(INDEX_DIR, "faiss.index")
+        # Graceful: if missing, report "not loaded" instead of crashing
+        if not os.path.exists(idx_path):
+            return None, None
+        FAISS = faiss.read_index(idx_path)
         p_parq = os.path.join(INDEX_DIR, "metadata.parquet")
         p_csv  = os.path.join(INDEX_DIR, "metadata.csv")
         if os.path.exists(p_parq):
@@ -54,7 +72,8 @@ def load_index():
         elif os.path.exists(p_csv):
             META = pd.read_csv(p_csv)
         else:
-            raise FileNotFoundError("No metadata found in data/index")
+            # No metadata available → treat as not loaded
+            return None, None
     return FAISS, META
 
 # ----- embeddings + retrieval -----
@@ -66,6 +85,9 @@ def embed(text: str) -> np.ndarray:
 
 def retrieve(query: str, k: int = 6) -> pd.DataFrame:
     fa, meta = load_index()
+    if fa is None or meta is None:
+        # No index → empty result; caller handles message
+        return pd.DataFrame(columns=["title","url","text","score"])
     v = embed(query)
     D, I = fa.search(v, k)
     return meta.iloc[I[0]].assign(score=D[0]).reset_index(drop=True)
@@ -137,6 +159,10 @@ SYSTEM = ("You are Adlatus-ZH’s assistant. Answer using ONLY the provided cont
 
 def answer_from_pdfs(query: str, k: int = 6) -> str:
     docs = retrieve(query, k=k)
+    if docs.empty:
+        return ("Ich habe dafür aktuell keinen konfigurierten Kontext. "
+                "Bitte stelle sicher, dass FAISS-Index + Metadaten vorhanden sind "
+                f"({INDEX_DIR}) oder setze INDEX_DIR/CONTACTS_PATH korrekt.")
     context = "\n\n".join(
         f"[{i+1}] {row.title} ({row.url})\n{row.text}"
         for i, row in docs.iterrows()
@@ -160,10 +186,21 @@ def health():
     n_contacts = len(load_contacts() or [])
     try:
         fa, meta = load_index()
-        n_index = fa.ntotal
+        n_index = 0 if fa is None else fa.ntotal
+        meta_loaded = bool(meta is not None)
     except Exception:
         n_index = 0
-    return {"ok": True, "contacts": n_contacts, "index": n_index}
+        meta_loaded = False
+    return {
+        "ok": True,
+        "contacts": n_contacts,
+        "index": n_index,
+        "meta_loaded": meta_loaded,
+        "paths": {"contacts_path": CONTACTS_PATH, "index_dir": INDEX_DIR},
+        "faiss_exists": os.path.exists(os.path.join(INDEX_DIR, "faiss.index")),
+        "meta_parquet_exists": os.path.exists(os.path.join(INDEX_DIR, "metadata.parquet")),
+        "meta_csv_exists": os.path.exists(os.path.join(INDEX_DIR, "metadata.csv")),
+    }
 
 @app.post("/ask")
 def ask(inp: AskIn):
@@ -173,6 +210,12 @@ def ask(inp: AskIn):
         c = pick_best_contact(q)
         if c:
             return {"type":"contact", "contact": format_contact(c)}
+        else:
+            return {
+                "type":"contact",
+                "contact": None,
+                "message":"Keine Kontakte geladen. Lege contacts.json an oder setze CONTACTS_PATH."
+            }
     # otherwise PDFs
     ans = answer_from_pdfs(q, k=inp.k or 6)
     return {"type":"answer", "answer": ans}
