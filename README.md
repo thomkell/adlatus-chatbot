@@ -38,7 +38,9 @@ adlatus-chatbot/
 `````
 
 ---
-## Wordpress implemntation
+## 🌐 WordPress embedding
+
+Copy paste to html code block on you website.
 
 `````
 <style>
