@@ -16,7 +16,7 @@ It can answer questions based on scraped website pages, PDF documents, and struc
 ---
 
 ## 📂 Project Structure
-'''
+`````
 adlatus-chatbot/
 │
 ├── adlatus_rag/                # Main project folder
@@ -35,4 +35,4 @@ adlatus-chatbot/
 ├── requirements.txt            # Python dependencies
 ├── .env                        # Environment variables (see below)
 └── README.md                   # Project documentation
-'''
+`````
