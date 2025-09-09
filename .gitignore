@@ -28,7 +28,10 @@ __pycache__/
 *.faiss
 *.chroma/
 *.jsonl
+*.json
 *.parquet
+*.pdf
+*.index
 
 # Logs
 *.log
