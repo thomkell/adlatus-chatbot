@@ -1,15 +1,15 @@
-Adlatus Chatbot 🤖
+##Adlatus Chatbot 🤖
 A Retrieval-Augmented Generation (RAG) chatbot for Adlatus Zürich, built with FastAPI, FAISS, and OpenAI’s Responses API.
 It can answer questions based on scraped website pages, PDF documents, and structured contacts data.
 
-🚀 Features
+## 🚀 Features
 FastAPI Backend – lightweight REST API with /ask endpoint
 RAG Pipeline – combines OpenAI models with local context retrieval
 FAISS Index – efficient vector search for knowledge retrieval
 Multi-source Knowledge – supports website content, PDF documents, and contact data
 Deploy Anywhere – works locally or on platforms like Render
 
-📂 Project Structure
+## 📂 Project Structure
 adlatus-chatbot/
 │
 ├── adlatus_rag/                # Main project folder
