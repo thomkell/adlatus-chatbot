@@ -1,38 +1,34 @@
-# Virtual environment
-.venv/
-venv/
-env/
-
 # Secrets
+.venv
 .env
 
-# Python cache
+# Caches / OS
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-
-# Jupyter Notebook checkpoints
 .ipynb_checkpoints
-
-# OS-specific
 .DS_Store
-
-# IDE configs
 .vscode/
 .idea/
 
-# VectorDB or local data
+# Build logs
+*.log
+
+# Vector DBs (keep generic, but allow our tracked files)
 *.db
 *.sqlite
 *.faiss
 *.chroma/
 *.jsonl
-*.json
-*.parquet
 *.pdf
-*.index
 
-# Logs
-*.log
 
+# Allow our app data
+!data/
+!data/index/
+!data/processed/
+!data/index/faiss.index
+!data/index/metadata.parquet
+!data/index/metadata.csv
+!data/processed/contacts.json
