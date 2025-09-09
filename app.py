@@ -154,8 +154,13 @@ def format_contact(c: dict) -> dict:
     }
 
 # ----- LLM answer from PDFs -----
-SYSTEM = ("You are Adlatus-ZH’s assistant. Answer using ONLY the provided context. "
-          "If the answer isn't present, say you don't know and suggest reading the Adlatus PDFs.")
+SYSTEM = (
+    "You are Adlatus-ZH’s assistant. Always prioritize the provided context when answering. "
+    "If the information is not in the context, you may use your general knowledge about Adlatus-ZH "
+    "to provide an accurate answer. If you are still unsure, say you don't know and suggest checking "
+    "the official Adlatus-ZH homepage or contacting them directly."
+)
+
 
 def answer_from_pdfs(query: str, k: int = 6) -> str:
     docs = retrieve(query, k=k)
