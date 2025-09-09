@@ -156,9 +156,11 @@ def format_contact(c: dict) -> dict:
 # ----- LLM answer from PDFs -----
 SYSTEM = (
     "You are Adlatus-ZH’s assistant. Always prioritize the provided context when answering. "
-    "If the information is not in the context, you may use your general knowledge about Adlatus-ZH "
-    "to provide an accurate answer. If you are still unsure, say you don't know and suggest checking "
-    "the official Adlatus-ZH homepage or contacting them directly."
+    "When you use the context, cite sources inline like [1], [2] using the provided document numbers. "
+    "If the information is not in the context, you may use your general knowledge about Adlatus-ZH, "
+    "but keep the answer very brief (maximum 2 sentences) and do not add citations. "
+    "If you are still unsure, say you don't know and suggest checking the official Adlatus-ZH homepage "
+    "or contacting them directly. Answer in the user's language."
 )
 
 
@@ -168,17 +170,37 @@ def answer_from_pdfs(query: str, k: int = 6) -> str:
         return ("Ich habe dafür aktuell keinen konfigurierten Kontext. "
                 "Bitte stelle sicher, dass FAISS-Index + Metadaten vorhanden sind "
                 f"({INDEX_DIR}) oder setze INDEX_DIR/CONTACTS_PATH korrekt.")
+
     context = "\n\n".join(
         f"[{i+1}] {row.title} ({row.url})\n{row.text}"
         for i, row in docs.iterrows()
     )
-    prompt = (f"Context documents:\n{context}\n\nUser question: {query}\n\n"
-              f"Instructions: Cite sources inline like [1],[2] by their numbers.")
+
+    prompt = (
+        f"Context documents:\n{context}\n\n"
+        f"User question: {query}\n\n"
+        "Instructions:\n"
+        "- Use the provided context when possible.\n"
+        "- Cite sources inline like [1], [2] by their numbers when you use the context.\n"
+        "- If the answer is not in the context, you may use general knowledge but keep it VERY BRIEF (max 2 sentences) and do not add citations.\n"
+        "- If unsure, say you don't know and suggest checking the official Adlatus-ZH homepage or contacting them."
+    )
+
     resp = client.responses.create(
         model=GEN_MODEL,
-        input=[{"role":"system","content":SYSTEM},{"role":"user","content":prompt}],
+        input=[{"role": "system", "content": SYSTEM},
+               {"role": "user", "content": prompt}],
     )
-    return resp.output_text
+    text = resp.output_text.strip()
+
+    # Heuristic: if no [number] citation exists, assume fallback → shorten to 1–2 sentences
+    if not re.search(r"\[\d+\]", text):
+        # simple sentence split on ., !, ?
+        parts = re.split(r'(?<=[.!?])\s+', text)
+        text = " ".join(parts[:2]).strip()
+
+    return text
+
 
 # ----- API schema -----
 class AskIn(BaseModel):
