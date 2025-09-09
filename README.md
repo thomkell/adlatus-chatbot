@@ -40,8 +40,7 @@ adlatus-chatbot/
 ---
 ## 🌐 WordPress embedding
 
-Copy paste to html code block on you website.
-
+Paste this snippet into a Custom HTML block on your site:
 `````
 <style>
   #chatbot-container {
