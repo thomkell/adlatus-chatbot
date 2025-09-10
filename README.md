@@ -38,6 +38,14 @@ adlatus-chatbot/
 `````
 
 ---
+## ❓ What's next?
+
+- 🧠 **Conversation Memory** – Persist chat history so the bot remembers context.  
+- 🔄 **Session Management** – Distinguish between different users and conversations.  
+- 📂 **Additional Data Sources** – Add more PDFs, structured databases, or CRM integrations.
+
+
+---
 ## 🌐 WordPress embedding
 
 Paste this snippet into a Custom HTML block on your site:
