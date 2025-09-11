@@ -1,8 +1,8 @@
-import os, json, re, time
+import os, json, re, time, random
 import numpy as np
 import pandas as pd
 import faiss
-from typing import Optional
+from typing import Optional, List
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -40,7 +40,7 @@ app.add_middleware(
 )
 
 # ----- session memory -----
-SESSION_MEMORY = {}  # {session_id: {"history": [(role, msg), ...], "last_contact": {...}, "last_used": ts}}
+SESSION_MEMORY = {}
 SESSION_TTL = 1800   # 30 minutes
 
 def cleanup_sessions():
@@ -67,7 +67,6 @@ def get_history(session_id):
 
 # ----- text normalization -----
 def normalize_query(text: str) -> str:
-    """Lowercase + normalize umlauts/ß for consistent keyword detection"""
     return (
         text.lower()
         .replace("ä","ae")
@@ -164,14 +163,15 @@ def score_contact(query: str, c: dict):
     if _email_localpart(c.get("email")) in GENERIC_EMAILS: score -= 0.6
     return (score, overlap)
 
-def pick_best_contact(query: str):
+def pick_random_contacts(query: str, k: int = 2) -> List[dict]:
     contacts = load_contacts()
-    if not contacts: return None
-    scored = [(lambda t: (t[0], t[1], c)) (score_contact(query, c)) for c in contacts]
-    scored = [t for t in scored if t[1] >= 1]
-    if not scored: return None
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return scored[0][2]
+    if not contacts: return []
+    scored = [(score_contact(query, c), c) for c in contacts]
+    scored = [t for t in scored if t[0][1] >= 1]  # at least one overlap
+    if not scored: return []
+    # shuffle and pick k
+    random.shuffle(scored)
+    return [c for (_, c) in scored[:k]]
 
 def format_contact(c: dict) -> dict:
     return {
@@ -235,20 +235,20 @@ def ask(inp: AskIn):
 
     # ---- contact intent ----
     if is_contact_intent(norm_q):
-        c = pick_best_contact(norm_q)
-        if c:
-            contact_data = format_contact(c)
-            session["last_contact"] = contact_data  # store for follow-ups
+        cs = pick_random_contacts(norm_q, k=2)
+        if cs:
+            contact_data = [format_contact(c) for c in cs]
+            session["last_contact"] = contact_data[0]  # store first for follow-ups
 
             add_to_history(session_id, "user", q)
-            add_to_history(session_id, "assistant", f"Kontakt gefunden: {contact_data['name']}")
+            add_to_history(session_id, "assistant", f"Kontakte gefunden: {[c['name'] for c in contact_data]}")
 
-            return {"type": "contact", "contact": contact_data, "session_id": session_id}
+            return {"type": "contacts", "contacts": contact_data, "session_id": session_id}
         else:
-            msg = "Keine Kontakte geladen. Lege contacts.json an oder setze CONTACTS_PATH."
+            msg = "Keine passenden Kontakte gefunden."
             add_to_history(session_id, "user", q)
             add_to_history(session_id, "assistant", msg)
-            return {"type": "contact", "contact": None, "message": msg, "session_id": session_id}
+            return {"type": "contacts", "contacts": [], "message": msg, "session_id": session_id}
 
     # ---- follow-up about last contact ----
     if any(word in norm_q for word in ["zustaendig","alternative","er","sie"]):
@@ -290,7 +290,6 @@ def ask(inp: AskIn):
     resp = client.responses.create(model=GEN_MODEL, input=messages)
     answer = resp.output_text.strip()
 
-    # detect advisor name in LLM answer → update last_contact
     contacts = load_contacts()
     for c in contacts:
         name = c.get("name")
