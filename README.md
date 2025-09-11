@@ -1,16 +1,17 @@
 # Adlatus Chatbot 🤖  
 
-A Retrieval-Augmented Generation (RAG) chatbot for [Adlatus Zürich](https://adlatus-zh.ch), built with **FastAPI**, **FAISS**, and **OpenAI’s Responses API**.  
-It can answer questions based on scraped website pages, PDF documents, and structured contacts data.
+A **Retrieval-Augmented Generation (RAG)** chatbot for [Adlatus Zürich](https://adlatus-zh.ch), built with **FastAPI**, **FAISS**, and **OpenAI’s Responses API**.  
+It answers questions based on **processed data** (e.g. contacts, PDFs, prepared documents) using **FAISS vector search**.  
+👉 Web scraping was used during initial data collection but is **not required for the current chatbot setup**.  
 
 ---
 
 ## 🚀 Features
 
 - **FastAPI Backend** – lightweight REST API with `/ask` endpoint  
-- **RAG Pipeline** – combines OpenAI models with local context retrieval  
-- **FAISS Index** – efficient vector search for knowledge retrieval  
-- **Multi-source Knowledge** – supports website content, PDF documents, and contact data  
+- **FAISS Index Only** – all answers are retrieved from a vector index of processed data  
+- **Multi-source Knowledge** – supports contacts and PDFs (extendable to other structured sources)  
+- **WordPress Integration** – chatbot widget that can be embedded in any WordPress site  
 - **Deploy Anywhere** – works locally or on platforms like [Render](https://render.com)  
 
 ---
@@ -40,8 +41,6 @@ adlatus-chatbot/
 ---
 ## ❓ What's next?
 
-- 🧠 **Conversation Memory** – Persist chat history so the bot remembers context.  
-- 🔄 **Session Management** – Distinguish between different users and conversations.  
 - 📂 **Additional Data Sources** – Add more PDFs, structured databases, or CRM integrations.
 
 
@@ -73,6 +72,9 @@ Paste this snippet into a Custom HTML block on your site:
     color: white;
     padding: 12px;
     font-weight: bold;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
   }
 
   #chatbot-messages {
@@ -132,12 +134,23 @@ Paste this snippet into a Custom HTML block on your site:
     cursor: pointer;
     z-index: 9999;
   }
+
+  #chatbot-reset {
+    font-size: 12px;
+    background: transparent;
+    border: none;
+    color: #fff;
+    cursor: pointer;
+  }
 </style>
 
 <div id="chatbot-toggle">💬</div>
 
 <div id="chatbot-container">
-  <div id="chatbot-header">Adlatus</div>
+  <div id="chatbot-header">
+    Adlatus
+    <button id="chatbot-reset">Reset</button>
+  </div>
   <div id="chatbot-messages">
     <div class="bot-message">Hallo! Ich bin Adlatus. Wie kann ich dir helfen?</div>
   </div>
@@ -152,10 +165,25 @@ Paste this snippet into a Custom HTML block on your site:
   const container = document.getElementById('chatbot-container');
   const messages = document.getElementById('chatbot-messages');
   const input = document.getElementById('chatbot-question');
+  const resetBtn = document.getElementById('chatbot-reset');
+
+  // 🔑 generate or reuse a session_id
+  let sessionId = localStorage.getItem("adlatus_session_id");
+  if (!sessionId) {
+    sessionId = "sess-" + Math.random().toString(36).substr(2, 9);
+    localStorage.setItem("adlatus_session_id", sessionId);
+  }
 
   toggle.onclick = () => {
     container.style.display = container.style.display === 'flex' ? 'none' : 'flex';
     container.style.flexDirection = 'column';
+  };
+
+  // 🔄 reset session (start fresh conversation)
+  resetBtn.onclick = () => {
+    sessionId = "sess-" + Math.random().toString(36).substr(2, 9);
+    localStorage.setItem("adlatus_session_id", sessionId);
+    messages.innerHTML = `<div class="bot-message">Neue Sitzung gestartet. Hallo! Wie kann ich dir helfen?</div>`;
   };
 
   async function sendToAdlatus() {
@@ -169,28 +197,34 @@ Paste this snippet into a Custom HTML block on your site:
       const res = await fetch('https://adlatus-chatbot.onrender.com/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: question })
+        body: JSON.stringify({ query: question, session_id: sessionId })
       });
 
       const data = await res.json();
 
-      if (data.type === 'contact' && data.contact) {
-        const c = data.contact;
-        messages.innerHTML += `<div class="bot-message">
-          <strong>${c.name || 'Kontakt'}</strong><br>
-          ${c.email ? '📧 ' + c.email + '<br>' : ''}
-          ${c.phone ? '📞 ' + c.phone + '<br>' : ''}
-          ${c.location ? '📍 ' + c.location + '<br>' : ''}
-          ${c.profile_url ? '<a href="'+c.profile_url+'" target="_blank">Profil öffnen ↗</a>' : ''}
-        </div>`;
+      if (data.type === 'contacts' && data.contacts && data.contacts.length > 0) {
+        data.contacts.forEach(c => {
+          messages.innerHTML += `<div class="bot-message">
+            <strong>${c.name || 'Kontakt'}</strong><br>
+            ${c.email ? '📧 ' + c.email + '<br>' : ''}
+            ${c.phone ? '📞 ' + c.phone + '<br>' : ''}
+            ${c.location ? '📍 ' + c.location + '<br>' : ''}
+            ${c.profile_url ? '<a href="'+c.profile_url+'" target="_blank">Profil öffnen ↗</a>' : ''}
+          </div>`;
+        });
+
       } else if (data.type === 'answer') {
         messages.innerHTML += `<div class="bot-message">${data.answer}</div>`;
+
+      } else if (data.message) {
+        messages.innerHTML += `<div class="bot-message">${data.message}</div>`;
+
       } else {
         messages.innerHTML += `<div class="bot-message">Entschuldigung, keine Antwort gefunden.</div>`;
       }
 
     } catch (err) {
-      messages.innerHTML += `<div class="bot-message">Fehler beim Verbinden mit dem Server.</div>`;
+      messages.innerHTML += `<div class="bot-message">⚠️ Der Chatbot ist momentan nicht erreichbar. Bitte versuche es später erneut.</div>`;
     }
 
     messages.scrollTop = messages.scrollHeight;
@@ -199,7 +233,7 @@ Paste this snippet into a Custom HTML block on your site:
   // ✅ Send on Enter key
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
-      event.preventDefault(); // prevents accidental line breaks
+      event.preventDefault();
       sendToAdlatus();
     }
   });
