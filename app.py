@@ -1,4 +1,5 @@
-import os, json, re, time, random
+# app.py
+import os, json, re, time
 import numpy as np
 import pandas as pd
 import faiss
@@ -33,15 +34,15 @@ client = OpenAI()
 app = FastAPI(title="Adlatus RAG API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten for prod later
+    allow_origins=["*"],  # tighten for prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ----- session memory -----
-SESSION_MEMORY = {}  # {session_id: {"history": [(role, msg), ...], "last_contact": {...}, "last_used": ts}}
-SESSION_TTL = 1800   # 30 minutes
+SESSION_MEMORY = {}  # {session_id: {"history": [(role,msg),...], "last_contacts": [...], "last_used": ts}}
+SESSION_TTL = 1800   # 30 min
 
 def cleanup_sessions():
     now = time.time()
@@ -49,10 +50,10 @@ def cleanup_sessions():
     for sid in expired:
         del SESSION_MEMORY[sid]
 
-def init_session(session_id):
+def init_session(session_id: str):
     cleanup_sessions()
     if session_id not in SESSION_MEMORY:
-        SESSION_MEMORY[session_id] = {"history": [], "last_contact": None, "last_used": time.time()}
+        SESSION_MEMORY[session_id] = {"history": [], "last_contacts": [], "last_used": time.time()}
     return SESSION_MEMORY[session_id]
 
 def add_to_history(session_id, role, content, max_len=10):
@@ -62,17 +63,13 @@ def add_to_history(session_id, role, content, max_len=10):
     s["history"] = s["history"][-max_len:]
 
 def get_history(session_id):
-    s = init_session(session_id)
-    return [{"role": r, "content": c} for r, c in s["history"]]
+    return [{"role": r, "content": c} for r, c in init_session(session_id)["history"]]
 
-# ----- text normalization -----
+# ----- normalization -----
 def normalize_query(text: str) -> str:
     return (
         text.lower()
-        .replace("ä", "ae")
-        .replace("ö", "oe")
-        .replace("ü", "ue")
-        .replace("ß", "ss")
+        .replace("ä","ae").replace("ö","oe").replace("ü","ue").replace("ß","ss")
     )
 
 # ----- load data -----
@@ -83,7 +80,7 @@ META = None
 def load_contacts():
     global CONTACTS
     if CONTACTS is None:
-        if CONTACTS_PATH and os.path.exists(CONTACTS_PATH):
+        if os.path.exists(CONTACTS_PATH):
             with open(CONTACTS_PATH, "r", encoding="utf-8") as f:
                 CONTACTS = json.load(f)
         else:
@@ -117,46 +114,39 @@ def embed(text: str) -> np.ndarray:
 def retrieve(query: str, k: int = 6) -> pd.DataFrame:
     fa, meta = load_index()
     if fa is None or meta is None:
-        return pd.DataFrame(columns=["title", "url", "text", "score"])
+        return pd.DataFrame(columns=["title","url","text","score"])
     v = embed(query)
     D, I = fa.search(v, k)
     return meta.iloc[I[0]].assign(score=D[0]).reset_index(drop=True)
 
 # ----- contact matching -----
-STOP_DE = {
-    "wer","ist","bin","bist","sind","seid","für","fuer","der","die","das","den","dem","des",
-    "ein","eine","einen","und","oder","mit","im","in","am","an","zu","zum","zur","vom","von",
-    "auf","aus","auch","bei","ohne","um","welcher","welche","welches","was","wie","wo","wann",
-    "warum","wieso","bitte","thema","zuständig","zustandig"
-}
+STOP_DE = {"wer","ist","bin","bist","sind","seid","für","fuer","der","die","das","den","dem","des",
+           "ein","eine","einen","und","oder","mit","im","in","am","an","zu","zum","zur","vom","von",
+           "auf","aus","auch","bei","ohne","um","welcher","welche","welches","was","wie","wo","wann",
+           "warum","wieso","bitte","thema","zuständig","zustandig"}
 GENERIC_EMAILS = {"info","kontakt","contact","office","support","hello","service","mail","team","adlatus-zurich"}
 
 CONTACT_INTENT = {"wer","ansprechpartner","ansprechperson","kontakt","email","telefon","zuständig","zustandig","berater"}
-SMALLTALK = {"hi","hallo","hello","hey","guten tag","servus","gruezi"}
 
 def is_contact_intent(q: str) -> bool:
     q = normalize_query(q)
     return any(w in q for w in CONTACT_INTENT)
 
-def is_smalltalk(q: str) -> bool:
-    return normalize_query(q) in SMALLTALK
-
 def _normalize(s: str) -> str:
-    if not s: return ""
-    s = s.lower()
-    return s.replace("ä","ae").replace("ö","oe").replace("ü","ue").replace("ß","ss")
+    return (s or "").lower().replace("ä","ae").replace("ö","oe").replace("ü","ue").replace("ß","ss")
 
 def _tokens(s: str): return re.findall(r"[a-z0-9]{2,}", _normalize(s))
 def _content_tokens(s: str): return {t for t in _tokens(s) if t not in STOP_DE}
 
 def _competency_tokens(c: dict):
-    comp_text = " ".join((c.get("competencies") or []))
+    comp_text = " ".join(c.get("competencies") or [])
     extra = " ".join([c.get("name",""), c.get("title","")])
     return _content_tokens(comp_text) | _content_tokens(extra)
 
 def _email_localpart(email: Optional[str]) -> Optional[str]:
-    if not email or "@" not in email: return None
-    return email.split("@",1)[0].lower()
+    if email and "@" in email:
+        return email.split("@",1)[0].lower()
+    return None
 
 def score_contact(query: str, c: dict):
     qtok = _content_tokens(query)
@@ -164,11 +154,11 @@ def score_contact(query: str, c: dict):
     if not ctok: return (-1e9, 0)
     overlap = len(qtok & ctok)
     jaccard = overlap / max(1, len(qtok | ctok))
-    score = overlap + 2.0 * jaccard
+    score = overlap + 2*jaccard
     if c.get("email"): score += 0.4
     if c.get("phone"): score += 0.2
     if _email_localpart(c.get("email")) in GENERIC_EMAILS: score -= 0.6
-    return (score, overlap)
+    return score, overlap
 
 def format_contact(c: dict) -> dict:
     return {
@@ -184,21 +174,23 @@ def pick_matching_contacts(query: str, max_results: int = 2):
     contacts = load_contacts()
     if not contacts:
         return []
-    scored = [(score_contact(query, c), c) for c in contacts]
-    scored = [c for (s, c) in scored if s[1] >= 1]
+    scored = []
+    for c in contacts:
+        sc, ov = score_contact(query, c)
+        if ov >= 1:  # mindestens 1 Kompetenz-Überschneidung
+            scored.append((sc, ov, c))
     if not scored:
         return []
-    random.shuffle(scored)
-    return [format_contact(c) for (_, c) in scored[:max_results]]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [format_contact(t[2]) for t in scored[:max_results]]
 
 # ----- system prompt -----
 SYSTEM = (
     "You are Adlatus-ZH’s assistant. Always prioritize the provided context when answering. "
-    "When you use the context, cite sources inline like [1], [2] using the provided document numbers. "
-    "If the information is not in the context, you may use your general knowledge about Adlatus-ZH, "
-    "but keep the answer very brief (maximum 2 sentences) and do not add citations. "
-    "If you are still unsure, say you don't know and suggest checking the official Adlatus-ZH homepage "
-    "or contacting them directly. Answer in the user's language."
+    "When you use the context, cite sources inline like [1],[2]. "
+    "If info not in context, keep the answer brief (≤2 sentences). "
+    "If unsure, say you don't know and suggest checking the official Adlatus-ZH homepage. "
+    "Answer in the user's language."
 )
 
 # ----- API schema -----
@@ -212,20 +204,15 @@ def health():
     n_contacts = len(load_contacts() or [])
     try:
         fa, meta = load_index()
-        n_index = 0 if fa is None else fa.ntotal
-        meta_loaded = bool(meta is not None)
+        n_index = fa.ntotal if fa else 0
+        meta_loaded = meta is not None
     except Exception:
-        n_index = 0
-        meta_loaded = False
+        n_index, meta_loaded = 0, False
     return {
         "ok": True,
         "contacts": n_contacts,
         "index": n_index,
         "meta_loaded": meta_loaded,
-        "paths": {"contacts_path": CONTACTS_PATH, "index_dir": INDEX_DIR},
-        "faiss_exists": os.path.exists(os.path.join(INDEX_DIR, "faiss.index")),
-        "meta_parquet_exists": os.path.exists(os.path.join(INDEX_DIR, "metadata.parquet")),
-        "meta_csv_exists": os.path.exists(os.path.join(INDEX_DIR, "metadata.csv")),
     }
 
 @app.post("/ask")
@@ -235,51 +222,27 @@ def ask(inp: AskIn):
     session_id = inp.session_id or "default"
     session = init_session(session_id)
 
-    # Smalltalk handler
-    if is_smalltalk(norm_q):
-        return {"type": "answer", "answer": "Hallo! Ich bin Adlatus. Wie kann ich dir helfen?", "session_id": session_id}
-
-    # Follow-up like "Kontakt bitte"
-    if any(word in norm_q for word in ["kontakt","email","telefon","adresse"]):
-        last_contact = session.get("last_contact")
-        if last_contact:
-            return {"type": "contacts", "contacts": [last_contact], "session_id": session_id}
-
-    # Contact intent
+    # --- contact intent ---
     if is_contact_intent(norm_q):
         matches = pick_matching_contacts(norm_q, max_results=2)
         if matches:
-            session["last_contact"] = matches[0]
+            session["last_contacts"] = matches
             add_to_history(session_id, "user", q)
-            add_to_history(session_id, "assistant", f"Kontakte gefunden: {[m['name'] for m in matches]}")
             return {"type": "contacts", "contacts": matches, "session_id": session_id}
-        else:
-            msg = "Keine passenden Kontakte gefunden."
-            add_to_history(session_id, "user", q)
-            add_to_history(session_id, "assistant", msg)
-            return {"type": "contacts", "contacts": [], "message": msg, "session_id": session_id}
+        return {"type": "contacts", "contacts": [], "message": "Keine passenden Kontakte gefunden.", "session_id": session_id}
 
-    # Fallback: RAG pipeline
+    # --- fallback: RAG pipeline ---
     docs = retrieve(q, k=inp.k or 6)
     context = ""
     if not docs.empty:
-        context = "\n\n".join(
-            f"[{i+1}] {row.title} ({row.url})\n{row.text}"
-            for i, row in docs.iterrows()
-        )
+        context = "\n\n".join(f"[{i+1}] {row.title} ({row.url})\n{row.text}" for i,row in docs.iterrows())
 
-    history = get_history(session_id)
-    messages = [{"role": "system", "content": SYSTEM}]
-    messages.extend(history)
-    messages.append({
-        "role": "user",
-        "content": f"Context documents:\n{context}\n\nUser question: {q}"
-    })
-
+    messages = [{"role":"system","content":SYSTEM}] + get_history(session_id) + [
+        {"role":"user","content": f"Context:\n{context}\n\nUser: {q}"}
+    ]
     resp = client.responses.create(model=GEN_MODEL, input=messages)
     answer = resp.output_text.strip()
 
     add_to_history(session_id, "user", q)
     add_to_history(session_id, "assistant", answer)
-
     return {"type": "answer", "answer": answer, "session_id": session_id}
