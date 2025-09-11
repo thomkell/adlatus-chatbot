@@ -164,6 +164,19 @@ def score_contact(query: str, c: dict):
     if _email_localpart(c.get("email")) in GENERIC_EMAILS: score -= 0.6
     return (score, overlap)
 
+def pick_random_contact(query: str):
+    """Wählt einen zufälligen passenden Kontakt aus (wenn mehrere möglich)."""
+    contacts = load_contacts()
+    if not contacts:
+        return None
+    scored = [(score_contact(query, c), c) for c in contacts]
+    # nur Kontakte mit mindestens 1 Treffer
+    scored = [c for (s, c) in scored if s[1] >= 1]
+    if not scored:
+        return None
+    import random
+    return random.choice(scored)
+
 def pick_best_contact(query: str):
     contacts = load_contacts()
     if not contacts: return None
@@ -235,15 +248,16 @@ def ask(inp: AskIn):
 
     # ---- contact intent ----
     if is_contact_intent(norm_q):
-        c = pick_best_contact(norm_q)
+        c = pick_random_contact(norm_q)
         if c:
             contact_data = format_contact(c)
             session["last_contact"] = contact_data  # store for follow-ups
 
             add_to_history(session_id, "user", q)
-            add_to_history(session_id, "assistant", f"Kontakt gefunden: {contact_data['name']}")
+            add_to_history(session_id, "assistant", f"Kontakt (zufällig gewählt) gefunden: {contact_data['name']}")
 
             return {"type": "contact", "contact": contact_data, "session_id": session_id}
+
         else:
             msg = "Keine Kontakte geladen. Lege contacts.json an oder setze CONTACTS_PATH."
             add_to_history(session_id, "user", q)
