@@ -65,6 +65,17 @@ def get_history(session_id):
     s = init_session(session_id)
     return [{"role": r, "content": c} for r, c in s["history"]]
 
+# ----- text normalization -----
+def normalize_query(text: str) -> str:
+    """Lowercase + normalize umlauts/ß for consistent keyword detection"""
+    return (
+        text.lower()
+        .replace("ä","ae")
+        .replace("ö","oe")
+        .replace("ü","ue")
+        .replace("ß","ss")
+    )
+
 # ----- load data -----
 CONTACTS = None
 FAISS = None
@@ -122,8 +133,7 @@ CONTACT_INTENT = {"wer","ansprechpartner","ansprechperson","kontakt","email","e-
                   "zuständig","zustandig","berater","fachmann","experte","ansprechstelle"}
 
 def is_contact_intent(q: str) -> bool:
-    q = q.lower()
-    return any(w in q for w in CONTACT_INTENT)
+    return any(w in normalize_query(q) for w in CONTACT_INTENT)
 
 def _normalize(s: str) -> str:
     if not s: return ""
@@ -213,18 +223,19 @@ def health():
 @app.post("/ask")
 def ask(inp: AskIn):
     q = inp.query.strip()
+    norm_q = normalize_query(q)
     session_id = inp.session_id or "default"
     session = init_session(session_id)
 
-    # ---- direct follow-up for "Kontakt bitte" ----
-    if any(word in q.lower() for word in ["kontakt","email","telefon","adresse"]):
+    # ---- direct follow-up like "Kontakt bitte" ----
+    if any(word in norm_q for word in ["kontakt","email","telefon","adresse"]):
         last_contact = session.get("last_contact")
         if last_contact:
             return {"type": "contact", "contact": last_contact, "session_id": session_id}
 
     # ---- contact intent ----
-    if is_contact_intent(q):
-        c = pick_best_contact(q)
+    if is_contact_intent(norm_q):
+        c = pick_best_contact(norm_q)
         if c:
             contact_data = format_contact(c)
             session["last_contact"] = contact_data  # store for follow-ups
@@ -239,8 +250,8 @@ def ask(inp: AskIn):
             add_to_history(session_id, "assistant", msg)
             return {"type": "contact", "contact": None, "message": msg, "session_id": session_id}
 
-    # ---- check for follow-up about last contact ----
-    if any(word in q.lower() for word in ["zuständig","alternative","er","sie"]):
+    # ---- follow-up about last contact ----
+    if any(word in norm_q for word in ["zustaendig","alternative","er","sie"]):
         last_contact = session.get("last_contact")
         if last_contact:
             history = get_history(session_id)
