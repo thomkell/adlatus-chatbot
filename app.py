@@ -213,21 +213,45 @@ def ask(inp: AskIn):
     q = inp.query.strip()
     session_id = inp.session_id or "default"
 
-    # contact intent
+    # ---- smarter contact intent ----
     if is_contact_intent(q):
         c = pick_best_contact(q)
         if c:
-            answer = format_contact(c)
+            contact_data = format_contact(c)
+            comp_text = ", ".join(contact_data.get("competencies", []))
+
+            # build conversation with structured contact info
+            history = get_history(session_id)
+            messages = [{"role": "system", "content": SYSTEM}]
+            messages.extend(history)
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"The user asked about a contact. Here is structured data:\n"
+                    f"{json.dumps(contact_data, indent=2)}\n\n"
+                    "Please provide a natural helpful answer in the user's language."
+                )
+            })
+
+            resp = client.responses.create(model=GEN_MODEL, input=messages)
+            answer = resp.output_text.strip()
+
             add_to_history(session_id, "user", q)
-            add_to_history(session_id, "assistant", f"Kontakt gefunden: {answer}")
-            return {"type":"contact", "contact": answer, "session_id": session_id}
+            add_to_history(session_id, "assistant", answer)
+
+            return {
+                "type": "contact",
+                "contact": contact_data,
+                "answer": answer,
+                "session_id": session_id
+            }
         else:
             msg = "Keine Kontakte geladen. Lege contacts.json an oder setze CONTACTS_PATH."
             add_to_history(session_id, "user", q)
             add_to_history(session_id, "assistant", msg)
-            return {"type":"contact", "contact": None, "message": msg, "session_id": session_id}
+            return {"type": "contact", "contact": None, "message": msg, "session_id": session_id}
 
-    # retrieve context
+    # ---- fallback: RAG pipeline ----
     docs = retrieve(q, k=inp.k or 6)
     context = ""
     if not docs.empty:
@@ -236,7 +260,6 @@ def ask(inp: AskIn):
             for i, row in docs.iterrows()
         )
 
-    # build prompt with history
     history = get_history(session_id)
     messages = [{"role": "system", "content": SYSTEM}]
     messages.extend(history)
@@ -245,12 +268,10 @@ def ask(inp: AskIn):
         "content": f"Context documents:\n{context}\n\nUser question: {q}"
     })
 
-    # LLM call
     resp = client.responses.create(model=GEN_MODEL, input=messages)
     answer = resp.output_text.strip()
 
-    # update memory
     add_to_history(session_id, "user", q)
     add_to_history(session_id, "assistant", answer)
 
-    return {"type":"answer", "answer": answer, "session_id": session_id}
+    return {"type": "answer", "answer": answer, "session_id": session_id}
