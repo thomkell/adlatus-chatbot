@@ -216,6 +216,12 @@ def ask(inp: AskIn):
     session_id = inp.session_id or "default"
     session = init_session(session_id)
 
+    # ---- direct follow-up for "Kontakt bitte" ----
+    if any(word in q.lower() for word in ["kontakt","email","telefon","adresse"]):
+        last_contact = session.get("last_contact")
+        if last_contact:
+            return {"type": "contact", "contact": last_contact, "session_id": session_id}
+
     # ---- contact intent ----
     if is_contact_intent(q):
         c = pick_best_contact(q)
@@ -226,11 +232,7 @@ def ask(inp: AskIn):
             add_to_history(session_id, "user", q)
             add_to_history(session_id, "assistant", f"Kontakt gefunden: {contact_data['name']}")
 
-            return {
-                "type": "contact",
-                "contact": contact_data,
-                "session_id": session_id
-            }
+            return {"type": "contact", "contact": contact_data, "session_id": session_id}
         else:
             msg = "Keine Kontakte geladen. Lege contacts.json an oder setze CONTACTS_PATH."
             add_to_history(session_id, "user", q)
@@ -276,6 +278,14 @@ def ask(inp: AskIn):
 
     resp = client.responses.create(model=GEN_MODEL, input=messages)
     answer = resp.output_text.strip()
+
+    # detect advisor name in LLM answer → update last_contact
+    contacts = load_contacts()
+    for c in contacts:
+        name = c.get("name")
+        if name and name.lower() in answer.lower():
+            session["last_contact"] = format_contact(c)
+            break
 
     add_to_history(session_id, "user", q)
     add_to_history(session_id, "assistant", answer)
