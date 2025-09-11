@@ -1,5 +1,4 @@
-# app.py
-import os, json, re
+import os, json, re, time
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -18,7 +17,7 @@ INDEX_DIR     = os.getenv("INDEX_DIR", "data/index")
 EMBED_MODEL   = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 GEN_MODEL     = os.getenv("GEN_MODEL", "gpt-4.1-mini")
 
-# --- tiny auto-detection for repo layouts (uses env if set; otherwise falls back) ---
+# --- auto-detection for repo layouts ---
 if not os.path.exists(CONTACTS_PATH):
     alt_contacts = "adlatus_rag/data/processed/contacts.json"
     if os.path.exists(alt_contacts):
@@ -41,6 +40,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ----- session memory -----
+SESSION_MEMORY = {}  # {session_id: {"history": [(role, msg), ...], "last_used": ts}}
+SESSION_TTL = 1800   # 30 minutes
+
+def cleanup_sessions():
+    now = time.time()
+    expired = [sid for sid, s in SESSION_MEMORY.items() if now - s["last_used"] > SESSION_TTL]
+    for sid in expired:
+        del SESSION_MEMORY[sid]
+
+def add_to_history(session_id, role, content, max_len=10):
+    cleanup_sessions()
+    if session_id not in SESSION_MEMORY:
+        SESSION_MEMORY[session_id] = {"history": [], "last_used": time.time()}
+    SESSION_MEMORY[session_id]["history"].append((role, content))
+    SESSION_MEMORY[session_id]["last_used"] = time.time()
+    SESSION_MEMORY[session_id]["history"] = SESSION_MEMORY[session_id]["history"][-max_len:]
+
+def get_history(session_id):
+    if session_id in SESSION_MEMORY:
+        return [{"role": r, "content": c} for r, c in SESSION_MEMORY[session_id]["history"]]
+    return []
+
 # ----- load data (lazy) -----
 CONTACTS = None
 FAISS = None
@@ -57,11 +79,9 @@ def load_contacts():
     return CONTACTS
 
 def load_index():
-    """Load FAISS + metadata if present. Return (None, None) if not."""
     global FAISS, META
     if FAISS is None or META is None:
         idx_path = os.path.join(INDEX_DIR, "faiss.index")
-        # Graceful: if missing, report "not loaded" instead of crashing
         if not os.path.exists(idx_path):
             return None, None
         FAISS = faiss.read_index(idx_path)
@@ -72,7 +92,6 @@ def load_index():
         elif os.path.exists(p_csv):
             META = pd.read_csv(p_csv)
         else:
-            # No metadata available → treat as not loaded
             return None, None
     return FAISS, META
 
@@ -86,13 +105,12 @@ def embed(text: str) -> np.ndarray:
 def retrieve(query: str, k: int = 6) -> pd.DataFrame:
     fa, meta = load_index()
     if fa is None or meta is None:
-        # No index → empty result; caller handles message
         return pd.DataFrame(columns=["title","url","text","score"])
     v = embed(query)
     D, I = fa.search(v, k)
     return meta.iloc[I[0]].assign(score=D[0]).reset_index(drop=True)
 
-# ----- contact matching (same logic as CLI bot) -----
+# ----- contact matching -----
 STOP_DE = {"wer","ist","bin","bist","sind","seid","für","fuer","der","die","das","den","dem","des",
            "ein","eine","einen","und","oder","mit","im","in","am","an","zu","zum","zur","vom","von",
            "auf","aus","auch","bei","ohne","um","welcher","welche","welches","was","wie","wo","wann",
@@ -138,7 +156,7 @@ def pick_best_contact(query: str):
     contacts = load_contacts()
     if not contacts: return None
     scored = [(lambda t: (t[0], t[1], c)) (score_contact(query, c)) for c in contacts]
-    scored = [t for t in scored if t[1] >= 1]  # need ≥1 topical overlap
+    scored = [t for t in scored if t[1] >= 1]
     if not scored: return None
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored[0][2]
@@ -153,7 +171,7 @@ def format_contact(c: dict) -> dict:
         "profile_url": c.get("profile_url"),
     }
 
-# ----- LLM answer from PDFs -----
+# ----- system prompt -----
 SYSTEM = (
     "You are Adlatus-ZH’s assistant. Always prioritize the provided context when answering. "
     "When you use the context, cite sources inline like [1], [2] using the provided document numbers. "
@@ -163,53 +181,14 @@ SYSTEM = (
     "or contacting them directly. Answer in the user's language."
 )
 
-
-def answer_from_pdfs(query: str, k: int = 6) -> str:
-    docs = retrieve(query, k=k)
-    if docs.empty:
-        return ("Ich habe dafür aktuell keinen konfigurierten Kontext. "
-                "Bitte stelle sicher, dass FAISS-Index + Metadaten vorhanden sind "
-                f"({INDEX_DIR}) oder setze INDEX_DIR/CONTACTS_PATH korrekt.")
-
-    context = "\n\n".join(
-        f"[{i+1}] {row.title} ({row.url})\n{row.text}"
-        for i, row in docs.iterrows()
-    )
-
-    prompt = (
-        f"Context documents:\n{context}\n\n"
-        f"User question: {query}\n\n"
-        "Instructions:\n"
-        "- Use the provided context when possible.\n"
-        "- Cite sources inline like [1], [2] by their numbers when you use the context.\n"
-        "- If the answer is not in the context, you may use general knowledge but keep it VERY BRIEF (max 2 sentences) and do not add citations.\n"
-        "- If unsure, say you don't know and suggest checking the official Adlatus-ZH homepage or contacting them."
-    )
-
-    resp = client.responses.create(
-        model=GEN_MODEL,
-        input=[{"role": "system", "content": SYSTEM},
-               {"role": "user", "content": prompt}],
-    )
-    text = resp.output_text.strip()
-
-    # Heuristic: if no [number] citation exists, assume fallback → shorten to 1–2 sentences
-    if not re.search(r"\[\d+\]", text):
-        # simple sentence split on ., !, ?
-        parts = re.split(r'(?<=[.!?])\s+', text)
-        text = " ".join(parts[:2]).strip()
-
-    return text
-
-
 # ----- API schema -----
 class AskIn(BaseModel):
     query: str
     k: Optional[int] = 6
+    session_id: Optional[str] = "default"
 
 @app.get("/health")
 def health():
-    # minimal sanity check
     n_contacts = len(load_contacts() or [])
     try:
         fa, meta = load_index()
@@ -232,17 +211,46 @@ def health():
 @app.post("/ask")
 def ask(inp: AskIn):
     q = inp.query.strip()
-    # contacts only if clear intent
+    session_id = inp.session_id or "default"
+
+    # contact intent
     if is_contact_intent(q):
         c = pick_best_contact(q)
         if c:
-            return {"type":"contact", "contact": format_contact(c)}
+            answer = format_contact(c)
+            add_to_history(session_id, "user", q)
+            add_to_history(session_id, "assistant", f"Kontakt gefunden: {answer}")
+            return {"type":"contact", "contact": answer, "session_id": session_id}
         else:
-            return {
-                "type":"contact",
-                "contact": None,
-                "message":"Keine Kontakte geladen. Lege contacts.json an oder setze CONTACTS_PATH."
-            }
-    # otherwise PDFs
-    ans = answer_from_pdfs(q, k=inp.k or 6)
-    return {"type":"answer", "answer": ans}
+            msg = "Keine Kontakte geladen. Lege contacts.json an oder setze CONTACTS_PATH."
+            add_to_history(session_id, "user", q)
+            add_to_history(session_id, "assistant", msg)
+            return {"type":"contact", "contact": None, "message": msg, "session_id": session_id}
+
+    # retrieve context
+    docs = retrieve(q, k=inp.k or 6)
+    context = ""
+    if not docs.empty:
+        context = "\n\n".join(
+            f"[{i+1}] {row.title} ({row.url})\n{row.text}"
+            for i, row in docs.iterrows()
+        )
+
+    # build prompt with history
+    history = get_history(session_id)
+    messages = [{"role": "system", "content": SYSTEM}]
+    messages.extend(history)
+    messages.append({
+        "role": "user",
+        "content": f"Context documents:\n{context}\n\nUser question: {q}"
+    })
+
+    # LLM call
+    resp = client.responses.create(model=GEN_MODEL, input=messages)
+    answer = resp.output_text.strip()
+
+    # update memory
+    add_to_history(session_id, "user", q)
+    add_to_history(session_id, "assistant", answer)
+
+    return {"type":"answer", "answer": answer, "session_id": session_id}
