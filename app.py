@@ -1,7 +1,6 @@
 import os, json, re, time
 import numpy as np
 import pandas as pd
-from pathlib import Path
 import faiss
 from typing import Optional
 from fastapi import FastAPI
@@ -17,7 +16,7 @@ INDEX_DIR     = os.getenv("INDEX_DIR", "data/index")
 EMBED_MODEL   = os.getenv("EMBED_MODEL", "text-embedding-3-small")
 GEN_MODEL     = os.getenv("GEN_MODEL", "gpt-4.1-mini")
 
-# --- auto-detection for repo layouts ---
+# --- auto-detect repo layout ---
 if not os.path.exists(CONTACTS_PATH):
     alt_contacts = "adlatus_rag/data/processed/contacts.json"
     if os.path.exists(alt_contacts):
@@ -41,7 +40,7 @@ app.add_middleware(
 )
 
 # ----- session memory -----
-SESSION_MEMORY = {}  # {session_id: {"history": [(role, msg), ...], "last_used": ts}}
+SESSION_MEMORY = {}  # {session_id: {"history": [(role, msg), ...], "last_contact": {...}, "last_used": ts}}
 SESSION_TTL = 1800   # 30 minutes
 
 def cleanup_sessions():
@@ -50,20 +49,23 @@ def cleanup_sessions():
     for sid in expired:
         del SESSION_MEMORY[sid]
 
-def add_to_history(session_id, role, content, max_len=10):
+def init_session(session_id):
     cleanup_sessions()
     if session_id not in SESSION_MEMORY:
-        SESSION_MEMORY[session_id] = {"history": [], "last_used": time.time()}
-    SESSION_MEMORY[session_id]["history"].append((role, content))
-    SESSION_MEMORY[session_id]["last_used"] = time.time()
-    SESSION_MEMORY[session_id]["history"] = SESSION_MEMORY[session_id]["history"][-max_len:]
+        SESSION_MEMORY[session_id] = {"history": [], "last_contact": None, "last_used": time.time()}
+    return SESSION_MEMORY[session_id]
+
+def add_to_history(session_id, role, content, max_len=10):
+    s = init_session(session_id)
+    s["history"].append((role, content))
+    s["last_used"] = time.time()
+    s["history"] = s["history"][-max_len:]
 
 def get_history(session_id):
-    if session_id in SESSION_MEMORY:
-        return [{"role": r, "content": c} for r, c in SESSION_MEMORY[session_id]["history"]]
-    return []
+    s = init_session(session_id)
+    return [{"role": r, "content": c} for r, c in s["history"]]
 
-# ----- load data (lazy) -----
+# ----- load data -----
 CONTACTS = None
 FAISS = None
 META = None
@@ -212,37 +214,21 @@ def health():
 def ask(inp: AskIn):
     q = inp.query.strip()
     session_id = inp.session_id or "default"
+    session = init_session(session_id)
 
-    # ---- smarter contact intent ----
+    # ---- contact intent ----
     if is_contact_intent(q):
         c = pick_best_contact(q)
         if c:
             contact_data = format_contact(c)
-            comp_text = ", ".join(contact_data.get("competencies", []))
-
-            # build conversation with structured contact info
-            history = get_history(session_id)
-            messages = [{"role": "system", "content": SYSTEM}]
-            messages.extend(history)
-            messages.append({
-                "role": "user",
-                "content": (
-                    f"The user asked about a contact. Here is structured data:\n"
-                    f"{json.dumps(contact_data, indent=2)}\n\n"
-                    "Please provide a natural helpful answer in the user's language."
-                )
-            })
-
-            resp = client.responses.create(model=GEN_MODEL, input=messages)
-            answer = resp.output_text.strip()
+            session["last_contact"] = contact_data  # store for follow-ups
 
             add_to_history(session_id, "user", q)
-            add_to_history(session_id, "assistant", answer)
+            add_to_history(session_id, "assistant", f"Kontakt gefunden: {contact_data['name']}")
 
             return {
                 "type": "contact",
                 "contact": contact_data,
-                "answer": answer,
                 "session_id": session_id
             }
         else:
@@ -250,6 +236,26 @@ def ask(inp: AskIn):
             add_to_history(session_id, "user", q)
             add_to_history(session_id, "assistant", msg)
             return {"type": "contact", "contact": None, "message": msg, "session_id": session_id}
+
+    # ---- check for follow-up about last contact ----
+    if any(word in q.lower() for word in ["zuständig","alternative","er","sie"]):
+        last_contact = session.get("last_contact")
+        if last_contact:
+            history = get_history(session_id)
+            messages = [{"role": "system", "content": SYSTEM}]
+            messages.extend(history)
+            messages.append({
+                "role": "user",
+                "content": f"The user is asking a follow-up about this contact:\n"
+                           f"{json.dumps(last_contact, indent=2)}\n\nQuestion: {q}"
+            })
+            resp = client.responses.create(model=GEN_MODEL, input=messages)
+            answer = resp.output_text.strip()
+
+            add_to_history(session_id, "user", q)
+            add_to_history(session_id, "assistant", answer)
+
+            return {"type": "answer", "answer": answer, "session_id": session_id}
 
     # ---- fallback: RAG pipeline ----
     docs = retrieve(q, k=inp.k or 6)
