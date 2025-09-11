@@ -9,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from openai import OpenAI
+import random
+
 
 # ----- config -----
 load_dotenv()
@@ -170,19 +172,28 @@ def format_contact(c: dict) -> dict:
         "profile_url": c.get("profile_url"),
     }
 
-def pick_matching_contacts(query: str, max_results: int = 2):
+def pick_matching_contacts(query: str, max_results: int = 2, pool_size: int = 5):
     contacts = load_contacts()
     if not contacts:
         return []
+
     scored = []
     for c in contacts:
         sc, ov = score_contact(query, c)
-        if ov >= 1:  # mindestens 1 Kompetenz-Überschneidung
+        if ov >= 1:
             scored.append((sc, ov, c))
+
     if not scored:
         return []
+
+    # sort by score, keep top pool_size
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [format_contact(t[2]) for t in scored[:max_results]]
+    pool = scored[:pool_size]
+
+    # pick up to max_results randomly from pool
+    chosen = random.sample(pool, min(max_results, len(pool)))
+
+    return [format_contact(t[2]) for t in chosen]
 
 # ----- system prompt -----
 SYSTEM = (
