@@ -1,4 +1,4 @@
-import os, json, re, time
+import os, json, re, time, random
 import numpy as np
 import pandas as pd
 import faiss
@@ -33,7 +33,7 @@ client = OpenAI()
 app = FastAPI(title="Adlatus RAG API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten for prod
+    allow_origins=["*"],  # tighten for prod later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -67,13 +67,12 @@ def get_history(session_id):
 
 # ----- text normalization -----
 def normalize_query(text: str) -> str:
-    """Lowercase + normalize umlauts/ß for consistent keyword detection"""
     return (
         text.lower()
-        .replace("ä","ae")
-        .replace("ö","oe")
-        .replace("ü","ue")
-        .replace("ß","ss")
+        .replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("ß", "ss")
     )
 
 # ----- load data -----
@@ -118,32 +117,29 @@ def embed(text: str) -> np.ndarray:
 def retrieve(query: str, k: int = 6) -> pd.DataFrame:
     fa, meta = load_index()
     if fa is None or meta is None:
-        return pd.DataFrame(columns=["title","url","text","score"])
+        return pd.DataFrame(columns=["title", "url", "text", "score"])
     v = embed(query)
     D, I = fa.search(v, k)
     return meta.iloc[I[0]].assign(score=D[0]).reset_index(drop=True)
 
 # ----- contact matching -----
-STOP_DE = {"wer","ist","bin","bist","sind","seid","für","fuer","der","die","das","den","dem","des",
-           "ein","eine","einen","und","oder","mit","im","in","am","an","zu","zum","zur","vom","von",
-           "auf","aus","auch","bei","ohne","um","welcher","welche","welches","was","wie","wo","wann",
-           "warum","wieso","bitte","thema","zuständig","zustandig"}
+STOP_DE = {
+    "wer","ist","bin","bist","sind","seid","für","fuer","der","die","das","den","dem","des",
+    "ein","eine","einen","und","oder","mit","im","in","am","an","zu","zum","zur","vom","von",
+    "auf","aus","auch","bei","ohne","um","welcher","welche","welches","was","wie","wo","wann",
+    "warum","wieso","bitte","thema","zuständig","zustandig"
+}
 GENERIC_EMAILS = {"info","kontakt","contact","office","support","hello","service","mail","team","adlatus-zurich"}
 
-# 🚩 stricter contact intent
-def is_contact_intent(q: str) -> bool:
-    q = normalize_query(q)
-    return any(w in q for w in [
-        "wer","ansprechpartner","ansprechperson",
-        "kontakt","email","telefon","zuständig","zustandig","berater"
-    ])
-
-# 🚩 smalltalk handler
+CONTACT_INTENT = {"wer","ansprechpartner","ansprechperson","kontakt","email","telefon","zuständig","zustandig","berater"}
 SMALLTALK = {"hi","hallo","hello","hey","guten tag","servus","gruezi"}
 
+def is_contact_intent(q: str) -> bool:
+    q = normalize_query(q)
+    return any(w in q for w in CONTACT_INTENT)
+
 def is_smalltalk(q: str) -> bool:
-    q = normalize_query(q).strip()
-    return q in SMALLTALK
+    return normalize_query(q) in SMALLTALK
 
 def _normalize(s: str) -> str:
     if not s: return ""
@@ -174,18 +170,6 @@ def score_contact(query: str, c: dict):
     if _email_localpart(c.get("email")) in GENERIC_EMAILS: score -= 0.6
     return (score, overlap)
 
-def pick_random_contact(query: str):
-    """Pick one random contact if multiple match."""
-    contacts = load_contacts()
-    if not contacts:
-        return None
-    scored = [(score_contact(query, c), c) for c in contacts]
-    scored = [c for (s, c) in scored if s[1] >= 1]
-    if not scored:
-        return None
-    import random
-    return random.choice(scored)
-
 def format_contact(c: dict) -> dict:
     return {
         "name": c.get("name"),
@@ -195,6 +179,17 @@ def format_contact(c: dict) -> dict:
         "competencies": c.get("competencies", [])[:10],
         "profile_url": c.get("profile_url"),
     }
+
+def pick_matching_contacts(query: str, max_results: int = 2):
+    contacts = load_contacts()
+    if not contacts:
+        return []
+    scored = [(score_contact(query, c), c) for c in contacts]
+    scored = [c for (s, c) in scored if s[1] >= 1]
+    if not scored:
+        return []
+    random.shuffle(scored)
+    return [format_contact(c) for (_, c) in scored[:max_results]]
 
 # ----- system prompt -----
 SYSTEM = (
@@ -240,32 +235,31 @@ def ask(inp: AskIn):
     session_id = inp.session_id or "default"
     session = init_session(session_id)
 
-    # ---- smalltalk handler ----
+    # Smalltalk handler
     if is_smalltalk(norm_q):
         return {"type": "answer", "answer": "Hallo! Ich bin Adlatus. Wie kann ich dir helfen?", "session_id": session_id}
 
-    # ---- direct follow-up like "Kontakt bitte" ----
+    # Follow-up like "Kontakt bitte"
     if any(word in norm_q for word in ["kontakt","email","telefon","adresse"]):
         last_contact = session.get("last_contact")
         if last_contact:
-            return {"type": "contact", "contact": last_contact, "session_id": session_id}
+            return {"type": "contacts", "contacts": [last_contact], "session_id": session_id}
 
-    # ---- contact intent ----
+    # Contact intent
     if is_contact_intent(norm_q):
-        c = pick_random_contact(norm_q)
-        if c:
-            contact_data = format_contact(c)
-            session["last_contact"] = contact_data
+        matches = pick_matching_contacts(norm_q, max_results=2)
+        if matches:
+            session["last_contact"] = matches[0]
             add_to_history(session_id, "user", q)
-            add_to_history(session_id, "assistant", f"Kontakt gefunden: {contact_data['name']}")
-            return {"type": "contact", "contact": contact_data, "session_id": session_id}
+            add_to_history(session_id, "assistant", f"Kontakte gefunden: {[m['name'] for m in matches]}")
+            return {"type": "contacts", "contacts": matches, "session_id": session_id}
         else:
             msg = "Keine passenden Kontakte gefunden."
             add_to_history(session_id, "user", q)
             add_to_history(session_id, "assistant", msg)
-            return {"type": "contact", "contact": None, "message": msg, "session_id": session_id}
+            return {"type": "contacts", "contacts": [], "message": msg, "session_id": session_id}
 
-    # ---- fallback: RAG pipeline ----
+    # Fallback: RAG pipeline
     docs = retrieve(q, k=inp.k or 6)
     context = ""
     if not docs.empty:
