@@ -1,5 +1,5 @@
-# ingest.py  — PDFs only (clean & minimal)
-import os, re, glob, argparse, pathlib
+# ingest.py — PDFs + Contacts → FAISS index
+import os, re, glob, argparse, pathlib, json
 from dataclasses import dataclass, asdict
 from typing import List, Dict
 
@@ -92,12 +92,40 @@ class Chunk:
     title: str
     text: str
     n_tokens: int
-    source: str  # "pdf"
+    source: str  # "pdf" or "contact"
+    # extra fields (for contacts)
+    name: str = None
+    email: str = None
+    phone: str = None
+    location: str = None
+
+# ---------- contacts loader ----------
+def load_contacts_json(path="data/processed/contacts.json") -> List[Dict]:
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        contacts = json.load(f)
+    records = []
+    for i, c in enumerate(contacts):
+        text = f"{c['name']}. Kompetenzen: {', '.join(c.get('competencies', []))}. Standort: {c.get('location','')}"
+        records.append({
+            "id": f"contact-{i}",
+            "url": c.get("profile_url",""),
+            "title": f"Kontakt: {c['name']}",
+            "text": text,
+            "source": "contact",
+            "name": c["name"],
+            "email": c.get("email"),
+            "phone": c.get("phone"),
+            "location": c.get("location"),
+        })
+    return records
 
 # ---------- main ----------
 def main():
-    ap = argparse.ArgumentParser(description="Ingest PDFs → FAISS index")
+    ap = argparse.ArgumentParser(description="Ingest PDFs + Contacts → FAISS index")
     ap.add_argument("--pdf_dir", default="data/raw/pdfs", help="Folder with PDFs")
+    ap.add_argument("--contacts_path", default="data/processed/contacts.json", help="Contacts JSON file")
     ap.add_argument("--out_dir", default="data/processed", help="Where to write chunks.jsonl")
     ap.add_argument("--index_dir", default="data/index", help="Where to write faiss.index + metadata")
     ap.add_argument("--max_tokens", type=int, default=500)
@@ -107,13 +135,10 @@ def main():
     pathlib.Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     pathlib.Path(args.index_dir).mkdir(parents=True, exist_ok=True)
 
+    records: List[Dict] = []
+
     # 1) Collect PDF records
     pdf_paths = sorted(glob.glob(os.path.join(args.pdf_dir, "*.pdf")))
-    if not pdf_paths:
-        print(f"No PDFs found in {args.pdf_dir}. Nothing to ingest.")
-        return
-
-    records: List[Dict] = []
     for p in pdf_paths:
         title = pdf_title(p)
         for pg in extract_pdf_pages(p):
@@ -124,43 +149,58 @@ def main():
                 "source": "pdf",
             })
 
-    # 2) Chunk
-    chunks: List[Chunk] = []
-    for r in records:
-        parts = chunk_text(r["text"], args.max_tokens, args.overlap_tokens)
-        for j, p in enumerate(parts):
-            cid = f"{r['url']}#chunk-{j:04d}"
-            chunks.append(Chunk(
-                id=cid, url=r["url"], title=r["title"],
-                text=p, n_tokens=count_tokens(p), source="pdf"
-            ))
-    if not chunks:
-        print("No chunks produced. Check your PDFs.")
+    # 2) Collect Contact records
+    records.extend(load_contacts_json(args.contacts_path))
+
+    if not records:
+        print("No PDFs or contacts found. Nothing to ingest.")
         return
 
-    # 3) Save chunks
-    import json
+    # 3) Chunk
+    chunks: List[Chunk] = []
+    for r in records:
+        if r["source"] == "pdf":
+            parts = chunk_text(r["text"], args.max_tokens, args.overlap_tokens)
+            for j, p in enumerate(parts):
+                cid = f"{r['url']}#chunk-{j:04d}"
+                chunks.append(Chunk(
+                    id=cid, url=r["url"], title=r["title"],
+                    text=p, n_tokens=count_tokens(p), source="pdf"
+                ))
+        elif r["source"] == "contact":
+            chunks.append(Chunk(
+                id=r["id"], url=r["url"], title=r["title"],
+                text=r["text"], n_tokens=count_tokens(r["text"]), source="contact",
+                name=r.get("name"), email=r.get("email"), phone=r.get("phone"), location=r.get("location")
+            ))
+
+    if not chunks:
+        print("No chunks produced. Check your data.")
+        return
+
+    # 4) Save chunks.jsonl
     chunks_path = os.path.join(args.out_dir, "chunks.jsonl")
     with open(chunks_path, "w", encoding="utf-8") as f:
         for c in chunks:
             f.write(json.dumps(asdict(c), ensure_ascii=False) + "\n")
     print(f"Wrote {len(chunks)} chunks -> {chunks_path}")
 
-    # 4) Embed
+    # 5) Embed
     texts = [c.text for c in chunks]
     embs = embed_texts(texts)
 
-    # 5) Build FAISS
+    # 6) Build FAISS
     import numpy as np, faiss
     X = np.array(embs, dtype="float32")
-    faiss.normalize_L2(X)  # cosine similarity via inner product
+    faiss.normalize_L2(X)  # cosine similarity
     index = faiss.IndexFlatIP(X.shape[1])
     index.add(X)
     faiss.write_index(index, os.path.join(args.index_dir, "faiss.index"))
 
-    # 6) Metadata (Parquet if available, else CSV)
+    # 7) Metadata (Parquet preferred)
     import pandas as pd
-    meta_df = pd.DataFrame([asdict(c) for c in chunks])
+    base = [asdict(c) for c in chunks]
+    meta_df = pd.DataFrame(base)
     try:
         import pyarrow as _pa  # noqa: F401
         meta_df.to_parquet(os.path.join(args.index_dir, "metadata.parquet"))
