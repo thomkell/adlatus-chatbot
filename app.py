@@ -167,11 +167,11 @@ def pick_random_contacts(query: str, k: int = 2) -> List[dict]:
     contacts = load_contacts()
     if not contacts: return []
     scored = [(score_contact(query, c), c) for c in contacts]
-    scored = [t for t in scored if t[0][1] >= 1]  # at least one overlap
+    # nur Kontakte mit mind. 1 Overlap
+    scored = [c for (s, c) in scored if s[1] >= 1]
     if not scored: return []
-    # shuffle and pick k
     random.shuffle(scored)
-    return [c for (_, c) in scored[:k]]
+    return scored[:k]
 
 def format_contact(c: dict) -> dict:
     return {
@@ -238,7 +238,7 @@ def ask(inp: AskIn):
         cs = pick_random_contacts(norm_q, k=2)
         if cs:
             contact_data = [format_contact(c) for c in cs]
-            session["last_contact"] = contact_data[0]  # store first for follow-ups
+            session["last_contact"] = contact_data[0]  # speichere ersten für Folgefragen
 
             add_to_history(session_id, "user", q)
             add_to_history(session_id, "assistant", f"Kontakte gefunden: {[c['name'] for c in contact_data]}")
@@ -290,6 +290,7 @@ def ask(inp: AskIn):
     resp = client.responses.create(model=GEN_MODEL, input=messages)
     answer = resp.output_text.strip()
 
+    # detect advisor name in LLM answer → update last_contact
     contacts = load_contacts()
     for c in contacts:
         name = c.get("name")
